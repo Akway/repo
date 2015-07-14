@@ -1,0 +1,17 @@
+#### NC Sh00tb0x ####
+
+Description : épreuve n°20 catégorie Hack du site newbiecontest.n0ne.org
+
+Tout d'abord, désolé pour la mise en page et la navigation au sein du script, je ne me suis pas
+trop pris la tête de ce côté là ;)
+
+Le but de l'épreuve est d'appeler la fonction valider() pour recupérer le code.
+
+Des fonctionnalités ont été desactivées dans la version en ligne notamment dans le "pannel" admin.
+
+Indice : La récupération de code ne pourra pas (a ma connaissance :p) se faire en 1 seule étape ...
+
+Je vous souhaite bon courage, je pense (et j'espère !) que vous allez vous y passer un peu de temps
+donc un peu de courage :p
+
+

@@ -1,0 +1,25 @@
+1 - taille du laby carte[x,y]
+
+2 - identifier coordonnees de 
+
+depart(bleu) sur x=0
+arrivee(rouge) sur x=carte[x]
+depart[] = 
+arrivee[] =
+
+
+
+3 - fonction laby (x_max,y_max, depart[x], depart[y],arrivee[x],arrivee[y])
+
+current_pos[] =   
+
+si on peut se deplacer a droite
+	go droite; // current_pos[x] = current_pos[x]+1 ;
+	actualise current_pos[] ;
+sinon
+	si current_pos[y] > arrivee[y]
+		go down;  // current_pos[y] = current_pos[y]-1 ;
+		actualise current_pos[] ;
+	si current_pos[y] < arrivee[y]
+		go up;  // current_pos[y] = current_pos[y]+1 ;
+		actualise current_pos[] ;
